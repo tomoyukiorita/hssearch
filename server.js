@@ -933,6 +933,38 @@ app.get('/files', (req, res) => {
   res.json(files);
 });
 
+// ファイル削除
+app.delete('/files/:filename', (req, res) => {
+  const filename = decodeURIComponent(req.params.filename);
+  const filePath = path.join(__dirname, filename);
+  
+  // セキュリティ: ディレクトリトラバーサル防止
+  if (!filePath.startsWith(__dirname)) {
+    return res.status(400).json({ error: '不正なファイルパス' });
+  }
+  
+  // hscodedb.xlsx は削除禁止
+  if (filename === 'hscodedb.xlsx') {
+    return res.status(400).json({ error: 'HSコードDBは削除できません' });
+  }
+  
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+    uploadedFiles.delete(filename);
+    
+    // 削除したファイルが商品マスターだった場合、クリア
+    if (uploadedProductFile === filename) {
+      uploadedProductFile = null;
+    }
+    
+    res.json({ success: true, filename });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // DB状態チェック
 app.get('/db-check', (req, res) => {
   const dbPath = path.join(__dirname, 'hscodedb.xlsx');
@@ -1193,9 +1225,12 @@ app.get('/', (req, res) => {
       
       if (files.length) {
         list.innerHTML = files.map(f => 
-          \`<div class="bg-slate-700/50 border border-slate-600 rounded px-3 py-1.5 text-sm flex items-center">
+          \`<div class="bg-slate-700/50 border border-slate-600 rounded px-3 py-1.5 text-sm flex items-center group">
             <span class="mr-2 text-xl">📄</span>
             <span class="truncate max-w-[150px]">\${f.name}</span>
+            <button onclick="deleteFile('\${f.name}')" class="ml-2 text-slate-500 hover:text-rose-400 transition-colors" title="削除">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
           </div>\`
         ).join('');
       } else {
@@ -1221,6 +1256,21 @@ app.get('/', (req, res) => {
       }
     }
     loadFiles();
+
+    async function deleteFile(filename) {
+      if (!confirm(\`"\${filename}" を削除しますか？\`)) return;
+      try {
+        const res = await fetch('/files/' + encodeURIComponent(filename), { method: 'DELETE' });
+        const data = await res.json();
+        if (data.success) {
+          loadFiles();
+        } else {
+          alert('削除失敗: ' + (data.error || '不明なエラー'));
+        }
+      } catch (e) {
+        alert('削除エラー: ' + e.message);
+      }
+    }
 
     async function uploadFile(file) {
       if (!file) return;
