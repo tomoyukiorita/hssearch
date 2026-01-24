@@ -110,3 +110,21 @@ Web検索（Google Search grounding）の参照ソースが「メーカー名 + 
 - `WEB_MATCH_REVIEW_LOW_SCORE`（デフォルト: `15`）
   - 例: `WEB_MATCH_REVIEW_LOW_SCORE=10`
 
+## データベース（PostgreSQL）
+
+調査結果（`results.json`）をPostgreSQLに永続化できます。`DATABASE_URL` が設定されていればDBを使い、なければローカルJSONにフォールバックします。
+
+### ローカル開発（JSONフォールバック）
+`DATABASE_URL` を設定しなければ、従来通り `results.json` に保存されます。
+
+### Railway + PostgreSQL
+1. Railwayプロジェクトで **Add Plugin → PostgreSQL** を追加
+2. PostgreSQLプラグインが追加されると、`DATABASE_URL` が自動で設定されます
+3. サーバ起動時にテーブルが自動作成されます
+
+### 手動でPostgreSQLを使う場合
+`.env` に以下を追加：
+```env
+DATABASE_URL=postgres://user:password@host:5432/dbname
+```
+

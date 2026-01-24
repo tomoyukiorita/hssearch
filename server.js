@@ -5,11 +5,51 @@ const path = require('path');
 const fs = require('fs');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const XLSX = require('xlsx');
+const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json());
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// PostgreSQL接続（DATABASE_URLがあればDB、なければローカルJSONにフォールバック）
+const pool = process.env.DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false }
+    })
+  : null;
+
+// DB初期化（テーブル作成）
+async function initDB() {
+  if (!pool) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS hs_results (
+      id SERIAL PRIMARY KEY,
+      jan VARCHAR(50) UNIQUE NOT NULL,
+      product_index INTEGER,
+      product_name TEXT,
+      maker TEXT,
+      investigation JSONB,
+      web_match_score INTEGER,
+      needs_review BOOLEAN DEFAULT FALSE,
+      web_match_reason TEXT,
+      web_hit_risk VARCHAR(20),
+      web_evidence JSONB,
+      hs_code VARCHAR(20),
+      hs_description TEXT,
+      reason TEXT,
+      invoice_description TEXT,
+      confidence VARCHAR(20),
+      hs_candidate_count INTEGER,
+      hs_candidates TEXT,
+      hs_keyword_debug TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  console.log('✅ PostgreSQL テーブル初期化完了');
+}
 
 // File upload
 const storage = multer.diskStorage({
@@ -18,15 +58,94 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// 結果DB（JSON保存）
+// 結果DB（PostgreSQL or JSONフォールバック）
 const RESULTS_FILE = path.join(__dirname, 'results.json');
-function loadResults() {
+
+async function loadResults() {
+  if (pool) {
+    const res = await pool.query('SELECT * FROM hs_results ORDER BY id');
+    return res.rows.map(row => ({
+      index: row.product_index,
+      jan: row.jan,
+      productName: row.product_name,
+      maker: row.maker,
+      investigation: row.investigation,
+      webMatchScore: row.web_match_score,
+      needsReview: row.needs_review,
+      webMatchReason: row.web_match_reason,
+      webHitRisk: row.web_hit_risk,
+      webEvidence: row.web_evidence,
+      hsCode: row.hs_code,
+      hsDescription: row.hs_description,
+      reason: row.reason,
+      invoiceDescription: row.invoice_description,
+      confidence: row.confidence,
+      hsCandidateCount: row.hs_candidate_count,
+      hsCandidates: row.hs_candidates,
+      hsKeywordDebug: row.hs_keyword_debug,
+      timestamp: row.updated_at?.toISOString() || row.created_at?.toISOString(),
+    }));
+  }
+  // フォールバック: ローカルJSON
   if (fs.existsSync(RESULTS_FILE)) {
     return JSON.parse(fs.readFileSync(RESULTS_FILE, 'utf8'));
   }
   return [];
 }
-function saveResults(results) {
+
+async function saveResults(results) {
+  if (pool) {
+    for (const r of results) {
+      await pool.query(`
+        INSERT INTO hs_results (
+          jan, product_index, product_name, maker, investigation,
+          web_match_score, needs_review, web_match_reason, web_hit_risk, web_evidence,
+          hs_code, hs_description, reason, invoice_description, confidence,
+          hs_candidate_count, hs_candidates, hs_keyword_debug, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW())
+        ON CONFLICT (jan) DO UPDATE SET
+          product_index = EXCLUDED.product_index,
+          product_name = EXCLUDED.product_name,
+          maker = EXCLUDED.maker,
+          investigation = EXCLUDED.investigation,
+          web_match_score = EXCLUDED.web_match_score,
+          needs_review = EXCLUDED.needs_review,
+          web_match_reason = EXCLUDED.web_match_reason,
+          web_hit_risk = EXCLUDED.web_hit_risk,
+          web_evidence = EXCLUDED.web_evidence,
+          hs_code = EXCLUDED.hs_code,
+          hs_description = EXCLUDED.hs_description,
+          reason = EXCLUDED.reason,
+          invoice_description = EXCLUDED.invoice_description,
+          confidence = EXCLUDED.confidence,
+          hs_candidate_count = EXCLUDED.hs_candidate_count,
+          hs_candidates = EXCLUDED.hs_candidates,
+          hs_keyword_debug = EXCLUDED.hs_keyword_debug,
+          updated_at = NOW()
+      `, [
+        r.jan,
+        r.index,
+        r.productName,
+        r.maker,
+        JSON.stringify(r.investigation || {}),
+        r.webMatchScore,
+        r.needsReview,
+        r.webMatchReason,
+        r.webHitRisk,
+        JSON.stringify(r.webEvidence || {}),
+        r.hsCode,
+        r.hsDescription,
+        r.reason,
+        r.invoiceDescription,
+        r.confidence,
+        r.hsCandidateCount,
+        r.hsCandidates,
+        r.hsKeywordDebug,
+      ]);
+    }
+    return;
+  }
+  // フォールバック: ローカルJSON
   fs.writeFileSync(RESULTS_FILE, JSON.stringify(results, null, 2), 'utf8');
 }
 
@@ -660,7 +779,7 @@ app.get('/investigate-stream', async (req, res) => {
   }
 
   // 結果をDB保存
-  const allResults = loadResults();
+  const allResults = await loadResults();
   for (const r of results) {
     const existingIndex = allResults.findIndex(x => x.jan === r.jan);
     if (existingIndex >= 0) {
@@ -669,7 +788,7 @@ app.get('/investigate-stream', async (req, res) => {
       allResults.push(r);
     }
   }
-  saveResults(allResults);
+  await saveResults(allResults);
 
   // 完了を送信
   res.write(`data: ${JSON.stringify({ type: 'complete', count: results.length, results })}\n\n`);
@@ -734,7 +853,7 @@ app.post('/investigate', async (req, res) => {
   }
 
   // 結果をDB保存
-  const allResults = loadResults();
+  const allResults = await loadResults();
   for (const r of results) {
     const existingIndex = allResults.findIndex(x => x.jan === r.jan);
     if (existingIndex >= 0) {
@@ -743,19 +862,19 @@ app.post('/investigate', async (req, res) => {
       allResults.push(r);
     }
   }
-  saveResults(allResults);
+  await saveResults(allResults);
 
   res.json({ success: true, count: results.length, results });
 });
 
 // 結果取得API
-app.get('/results', (req, res) => {
-  res.json(loadResults());
+app.get('/results', async (req, res) => {
+  res.json(await loadResults());
 });
 
 // 結果をExcel出力
-app.get('/export', (req, res) => {
-  const results = loadResults();
+app.get('/export', async (req, res) => {
+  const results = await loadResults();
   const data = results.map(r => ({
     'JANコード': r.jan,
     '商品名': r.productName,
@@ -1302,11 +1421,17 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => {
-  console.log(`
+
+// サーバ起動（DB初期化後）
+(async () => {
+  await initDB();
+  app.listen(PORT, () => {
+    console.log(`
 +--------------------------------------------------+
 | HSコード自動分類システム                            |
 | http://localhost:${PORT}                           |
+| DB: ${pool ? 'PostgreSQL' : 'ローカルJSON'}
 +--------------------------------------------------+
-  `);
-});
+    `);
+  });
+})();
