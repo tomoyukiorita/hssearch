@@ -1319,70 +1319,81 @@ app.get('/', (req, res) => {
       }
     }
 
+    const BATCH_SIZE = 5;
+
     async function startInvestigation() {
       const startIndex = parseInt(document.getElementById('startIndex').value);
-      const count = parseInt(document.getElementById('count').value);
+      const totalCount = parseInt(document.getElementById('count').value);
       const btn = document.getElementById('startBtn');
       const progress = document.getElementById('progress');
-      
+
       btn.disabled = true;
       btn.classList.add('opacity-50', 'cursor-not-allowed');
       progress.style.display = 'block';
-      
-      const results = [];
-      
-      try {
-        const eventSource = new EventSource(\`/investigate-stream?startIndex=\${startIndex}&count=\${count}\`);
-        
-        eventSource.onmessage = (event) => {
-          const data = JSON.parse(event.data);
-          
-          if (data.type === 'progress') {
-            const percent = Math.round((data.current / data.total) * 100);
-            progress.innerHTML = \`
-              <div class="space-y-2">
-                <div class="flex items-center justify-between text-sm">
-                  <span class="text-sky-400 flex items-center">
-                    <svg class="animate-spin mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    調査中: \${data.productName}
-                  </span>
-                  <span class="text-slate-400">\${data.current}/\${data.total}</span>
-                </div>
-                <div class="w-full bg-slate-700 rounded-full h-2">
-                  <div class="bg-gradient-to-r from-sky-500 to-indigo-500 h-2 rounded-full transition-all duration-300" style="width: \${percent}%"></div>
-                </div>
-              </div>
-            \`;
-          } else if (data.type === 'result') {
-            results.push(data.result);
-            displayResults(results);
-          } else if (data.type === 'complete') {
-            progress.innerHTML = \`<div class="text-emerald-400 font-medium">✅ 完了: \${data.count}件を調査しました</div>\`;
-            eventSource.close();
-            btn.disabled = false;
-            btn.classList.remove('opacity-50', 'cursor-not-allowed');
-          } else if (data.type === 'error') {
-            progress.innerHTML = \`<div class="text-rose-400">❌ エラー: \${data.message}</div>\`;
-            eventSource.close();
-            btn.disabled = false;
-            btn.classList.remove('opacity-50', 'cursor-not-allowed');
-          }
-        };
-        
-        eventSource.onerror = () => {
-          progress.innerHTML = \`<div class="text-rose-400">❌ 接続エラー</div>\`;
-          eventSource.close();
+
+      const allResults = [];
+      let processed = 0;
+
+      for (let offset = 0; offset < totalCount; offset += BATCH_SIZE) {
+        const batchStart = startIndex + offset;
+        const batchCount = Math.min(BATCH_SIZE, totalCount - offset);
+
+        try {
+          await new Promise((resolve, reject) => {
+            const eventSource = new EventSource(\`/investigate-stream?startIndex=\${batchStart}&count=\${batchCount}\`);
+
+            eventSource.onmessage = (event) => {
+              const data = JSON.parse(event.data);
+
+              if (data.type === 'progress') {
+                const current = processed + data.current;
+                const percent = Math.round((current / totalCount) * 100);
+                progress.innerHTML = \`
+                  <div class="space-y-2">
+                    <div class="flex items-center justify-between text-sm">
+                      <span class="text-sky-400 flex items-center">
+                        <svg class="animate-spin mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        調査中: \${esc(data.productName)}
+                      </span>
+                      <span class="text-slate-400">\${current}/\${totalCount}</span>
+                    </div>
+                    <div class="w-full bg-slate-700 rounded-full h-2">
+                      <div class="bg-gradient-to-r from-sky-500 to-indigo-500 h-2 rounded-full transition-all duration-300" style="width: \${percent}%"></div>
+                    </div>
+                  </div>
+                \`;
+              } else if (data.type === 'result') {
+                allResults.push(data.result);
+                displayResults(allResults);
+              } else if (data.type === 'complete') {
+                processed += data.count;
+                eventSource.close();
+                resolve();
+              } else if (data.type === 'error') {
+                eventSource.close();
+                reject(new Error(data.message));
+              }
+            };
+
+            eventSource.onerror = () => {
+              eventSource.close();
+              reject(new Error('接続エラー'));
+            };
+          });
+        } catch (e) {
+          progress.innerHTML = \`<div class="text-rose-400">❌ エラー (バッチ \${Math.floor(offset / BATCH_SIZE) + 1}): \${esc(e.message)}</div>\`;
           btn.disabled = false;
           btn.classList.remove('opacity-50', 'cursor-not-allowed');
-        };
-      } catch (e) {
-        progress.innerHTML = \`<div class="text-rose-400">❌ エラー: \${e.message}</div>\`;
-        btn.disabled = false;
-        btn.classList.remove('opacity-50', 'cursor-not-allowed');
+          return;
+        }
       }
+
+      progress.innerHTML = \`<div class="text-emerald-400 font-medium">✅ 完了: \${processed}件を調査しました</div>\`;
+      btn.disabled = false;
+      btn.classList.remove('opacity-50', 'cursor-not-allowed');
     }
 
     async function loadResults() {
