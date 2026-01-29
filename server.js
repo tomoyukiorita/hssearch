@@ -873,6 +873,23 @@ app.post('/investigate', async (req, res) => {
   res.json({ success: true, count: results.length, results });
 });
 
+// 結果個別削除API
+app.delete('/results/:jan', async (req, res) => {
+  const jan = req.params.jan;
+  try {
+    if (pool) {
+      await pool.query('DELETE FROM hs_results WHERE jan = $1', [jan]);
+    } else {
+      const results = await loadResults();
+      const filtered = results.filter(r => r.jan !== jan);
+      fs.writeFileSync(RESULTS_FILE, JSON.stringify(filtered, null, 2), 'utf8');
+    }
+    res.json({ success: true, jan });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // 結果取得API
 app.get('/results', async (req, res) => {
   res.json(await loadResults());
@@ -1201,6 +1218,7 @@ app.get('/', (req, res) => {
               <th class="px-6 py-4">Invoice説明(EN)</th>
               <th class="px-6 py-4">確信度</th>
               <th class="px-6 py-4">判定理由</th>
+              <th class="px-6 py-4">操作</th>
             </tr>
           </thead>
           <tbody id="resultsBody" class="divide-y divide-slate-700">
@@ -1421,8 +1439,30 @@ app.get('/', (req, res) => {
             </span>
           </td>
           <td class="px-6 py-4 text-slate-400 max-w-xs truncate" title="\${r.reason || ''}">\${r.reason || ''}</td>
+          <td class="px-6 py-4">
+            <button onclick="deleteResult('\${r.jan}')" class="text-rose-400 hover:text-rose-300 transition-colors" title="削除">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            </button>
+          </td>
         </tr>\`;
       }).join('');
+    }
+
+    async function deleteResult(jan) {
+      if (!confirm('この結果を削除しますか？')) return;
+      try {
+        const res = await fetch('/results/' + encodeURIComponent(jan), { method: 'DELETE' });
+        const data = await res.json();
+        if (data.success) {
+          loadResults();
+        } else {
+          alert('削除失敗: ' + (data.error || '不明なエラー'));
+        }
+      } catch (e) {
+        alert('削除エラー: ' + e.message);
+      }
     }
 
     function exportResults() {
