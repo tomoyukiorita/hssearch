@@ -1391,6 +1391,12 @@ app.get('/', (req, res) => {
       displayResults(results);
     }
 
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = String(s || '');
+      return d.innerHTML;
+    }
+
     function displayResults(results) {
       const tbody = document.getElementById('resultsBody');
       const emptyState = document.getElementById('emptyState');
@@ -1425,20 +1431,20 @@ app.get('/', (req, res) => {
         const tooltip = needsReview ? tooltipParts.join('\\n') : String(matchReason || '');
         const scoreText = (score === null || score === undefined || score === '') ? '-' : String(score);
         const matchBadge = needsReview
-          ? \`<span class="px-2 py-1 rounded-full text-xs border text-rose-400 bg-rose-900/30 border-rose-800/50" title="\${tooltip}">要確認 \${scoreText}</span>\`
-          : \`<span class="px-2 py-1 rounded-full text-xs border text-slate-300 bg-slate-900/30 border-slate-700/50" title="\${tooltip}">\${scoreText}</span>\`;
+          ? \`<span class="px-2 py-1 rounded-full text-xs border text-rose-400 bg-rose-900/30 border-rose-800/50" title="\${esc(tooltip)}">要確認 \${esc(scoreText)}</span>\`
+          : \`<span class="px-2 py-1 rounded-full text-xs border text-slate-300 bg-slate-900/30 border-slate-700/50" title="\${esc(tooltip)}">\${esc(scoreText)}</span>\`;
         
         return \`<tr class="hover:bg-slate-700/30 transition-colors">
-          <td class="px-6 py-4 font-medium text-slate-200">\${r.productName || ''}</td>
+          <td class="px-6 py-4 font-medium text-slate-200">\${esc(r.productName)}</td>
           <td class="px-6 py-4">\${matchBadge}</td>
-          <td class="px-6 py-4 text-sky-300 font-mono">\${r.hsCode || '不明'}</td>
-          <td class="px-6 py-4 text-slate-400">\${r.invoiceDescription || ''}</td>
+          <td class="px-6 py-4 text-sky-300 font-mono">\${esc(r.hsCode || '不明')}</td>
+          <td class="px-6 py-4 text-slate-400">\${esc(r.invoiceDescription)}</td>
           <td class="px-6 py-4">
             <span class="px-2 py-1 rounded-full text-xs border \${confColor}">
-              \${r.confidence || '-'}
+              \${esc(r.confidence || '-')}
             </span>
           </td>
-          <td class="px-6 py-4 text-slate-400 max-w-xs truncate" title="\${r.reason || ''}">\${r.reason || ''}</td>
+          <td class="px-6 py-4 text-slate-400 max-w-xs truncate" title="\${esc(r.reason)}">\${esc(r.reason)}</td>
           <td class="px-6 py-4">
             <button onclick="deleteResult('\${r.jan}')" class="text-rose-400 hover:text-rose-300 transition-colors" title="削除">
               <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
