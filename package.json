@@ -23,6 +23,7 @@
   "dependencies": {
     "@google/adk": "^0.2.2",
     "@google/adk-devtools": "^0.2.2",
+    "@google/genai": "^1.38.0",
     "@google/generative-ai": "^0.24.1",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",

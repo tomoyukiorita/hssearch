@@ -3,14 +3,39 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenAI } = require('@google/genai');
 const XLSX = require('xlsx');
 const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json());
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+const investigationJsonSchema = {
+  type: 'object',
+  properties: {
+    productDescription: { type: 'string', description: '商品の説明（日本語、100文字程度）' },
+    materials: { type: 'array', items: { type: 'string' }, description: '材質リスト' },
+    usage: { type: 'array', items: { type: 'string' }, description: '用途リスト' },
+    category: { type: 'string', description: '商品カテゴリ' },
+    hsKeywords: { type: 'array', items: { type: 'string' }, description: 'HSコード検索用キーワード' },
+    searchQuery: { type: 'string', description: '実際に使用した検索クエリ' },
+  },
+  required: ['productDescription', 'materials', 'usage', 'category', 'hsKeywords', 'searchQuery'],
+};
+
+const hsCodeJsonSchema = {
+  type: 'object',
+  properties: {
+    hsCode: { type: 'string', description: '6桁HSコード（数字のみ、ドットなし）。判断不能な場合のみ"不明"' },
+    hsDescription: { type: 'string', description: '選んだHSコードの説明' },
+    reason: { type: 'string', description: '選定理由（日本語、50文字程度）' },
+    invoiceDescription: { type: 'string', description: 'Invoice用英語商品説明（30文字程度）' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: '確信度' },
+  },
+  required: ['hsCode', 'hsDescription', 'reason', 'invoiceDescription', 'confidence'],
+};
 
 // PostgreSQL接続（DATABASE_URLがあればDB、なければローカルJSONにフォールバック）
 const pool = process.env.DATABASE_URL
@@ -522,11 +547,6 @@ function searchHSCode(keywords, limit = 5) {
 
 // ウェブ検索で商品調査 + HSコード特定
 async function investigateProduct(product) {
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-3-flash-preview',
-    tools: [{ googleSearch: {} }]  // Google Search grounding
-  });
-
   // 1段階目: メーカー名 + 商品名の順で検索（メーカー優先）
   const searchQuery = `${product.maker || ''} ${product.productName}`.trim();
   const prompt = `以下の検索クエリでウェブ検索し、この商品について調査してください。
@@ -542,23 +562,20 @@ async function investigateProduct(product) {
 1. この商品は何か（材質、成分、用途）
 2. HSコード分類に必要なキーワード
 
-もし上記の検索で商品情報が見つからない場合は、別のクエリで再検索してください。
-
-必ず以下のJSON形式で回答してください：
-{
-  "productDescription": "商品の説明（日本語、100文字程度）",
-  "materials": ["材質1", "材質2"],
-  "usage": ["用途1", "用途2"],
-  "category": "商品カテゴリ",
-  "hsKeywords": ["HSコード検索用キーワード1", "キーワード2", "キーワード3"],
-  "searchQuery": "実際に使用した検索クエリ"
-}`;
+もし上記の検索で商品情報が見つからない場合は、別のクエリで再検索してください。`;
 
   try {
-    const result = await model.generateContent(prompt);
-    const response = result.response;
-    const text = response.text();
-    
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+      config: {
+        tools: [{ googleSearch: {} }],
+        responseMimeType: 'application/json',
+        responseJsonSchema: investigationJsonSchema,
+      },
+    });
+    const text = response.text;
+
     // Grounding metadata をログ出力
     const candidate = response.candidates?.[0];
     const groundingMetadata = candidate?.groundingMetadata;
@@ -579,16 +596,12 @@ async function investigateProduct(product) {
     } else {
       console.log('⚠️ Web Search未使用（groundingMetadataなし）');
     }
-    
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      const match = computeWebMatchScore(product.maker, product.productName, webChunks);
-      return { ...parsed, ...match };
-    }
+
+    const parsed = JSON.parse(text);
     const match = computeWebMatchScore(product.maker, product.productName, webChunks);
-    return { error: 'JSON解析失敗', rawResponse: text, ...match };
+    return { ...parsed, ...match };
   } catch (e) {
+    console.error(`❌ investigateProduct エラー [${product.productName}]:`, e.status || '', e.message);
     return { error: e.message };
   }
 }
@@ -615,8 +628,6 @@ async function determineHSCode(product, investigation) {
   const candidates = searchHSCode(keywords, 5);
 
   // Geminiで最適なHSコードを判定 + Invoice説明生成
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-  
   const prompt = `商品情報と調査結果から、最適なHSコードを選び、Invoice用の英語商品説明を作成してください。
 
 【重要】HSコード分類ルール：
@@ -641,36 +652,31 @@ async function determineHSCode(product, investigation) {
 HSコード候補:
 ${candidates.map(c => `- ${c.code}: ${c.description}`).join('\n') || 'なし'}
 
-※候補に適切なものがない場合は、用途に基づいて正しいHSコードを選んでください。
-
-以下のJSON形式で回答してください：
-{
-  "hsCode": "6桁HSコード",
-  "hsDescription": "選んだHSコードの説明",
-  "reason": "選定理由（日本語、50文字程度）",
-  "invoiceDescription": "Invoice用英語商品説明（30文字程度、通関士が理解できる内容）",
-  "confidence": "high/medium/low"
-}`;
+※候補に適切なものがない場合は、用途に基づいて正しいHSコードを選んでください。`;
 
   try {
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      // HSコードを6桁ドットなしに正規化
-      if (parsed.hsCode) {
-        parsed.hsCode = normalizeHSCode(parsed.hsCode);
-      }
-      // 候補ゼロ時のガード（原則は推定させるが、空なら不明にする）
-      if (candidates.length === 0) {
-        if (!parsed.hsCode || parsed.hsCode === '000000') parsed.hsCode = '不明';
-        if (!parsed.confidence) parsed.confidence = 'low';
-      }
-      return { ...parsed, _debug: { keywords, candidates } };
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseJsonSchema: hsCodeJsonSchema,
+      },
+    });
+    const text = response.text;
+    const parsed = JSON.parse(text);
+    // HSコードを6桁ドットなしに正規化
+    if (parsed.hsCode) {
+      parsed.hsCode = normalizeHSCode(parsed.hsCode);
     }
-    return { hsCode: candidates[0]?.code || '不明', error: 'JSON解析失敗', _debug: { keywords, candidates } };
+    // 候補ゼロ時のガード（原則は推定させるが、空なら不明にする）
+    if (candidates.length === 0) {
+      if (!parsed.hsCode || parsed.hsCode === '000000') parsed.hsCode = '不明';
+      if (!parsed.confidence) parsed.confidence = 'low';
+    }
+    return { ...parsed, _debug: { keywords, candidates } };
   } catch (e) {
+    console.error(`❌ determineHSCode エラー [${product.productName}]:`, e.status || '', e.message);
     return { hsCode: candidates[0]?.code || '不明', error: e.message, _debug: { keywords, candidates } };
   }
 }
@@ -1228,9 +1234,7 @@ app.get('/', (req, res) => {
           \`<div class="bg-slate-700/50 border border-slate-600 rounded px-3 py-1.5 text-sm flex items-center group">
             <span class="mr-2 text-xl">📄</span>
             <span class="truncate max-w-[150px]">\${f.name}</span>
-            <button onclick="deleteFile('\${f.name}')" class="ml-2 text-slate-500 hover:text-rose-400 transition-colors" title="削除">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-            </button>
+            <button onclick="deleteFile('\${f.name}')" class="ml-2 px-1 text-slate-400 hover:text-rose-400 transition-colors text-base font-bold" title="削除">&times;</button>
           </div>\`
         ).join('');
       } else {
